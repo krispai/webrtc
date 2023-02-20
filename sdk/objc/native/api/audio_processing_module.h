@@ -1,9 +1,6 @@
 #ifndef SDK_OBJC_NATIVE_API_AUDIO_PROCESSING_MODULE_H_
 #define SDK_OBJC_NATIVE_API_AUDIO_PROCESSING_MODULE_H_
 
-// #include <memory>
-// #include "api/scoped_refptr.h"
-
 #import "components/audio//RTCAudioProcessing.h"
 #include "modules/audio_processing/include/audio_processing.h"
 

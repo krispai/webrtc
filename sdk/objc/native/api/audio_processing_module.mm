@@ -9,7 +9,6 @@ namespace webrtc {
     RTC_DLOG(LS_INFO) << __FUNCTION__;
     unsigned long audioProcessor = [objc_audio_processing_module audioProcessing];
     AudioProcessing* audioProcesSmartPointer = reinterpret_cast<AudioProcessing*>(audioProcessor);
-    //AudioProcessing* audioProcesSmartPointer = (AudioProcessing*)audioProcessor;
     return rtc::scoped_refptr<AudioProcessing>(audioProcesSmartPointer);
   }
 }  // namespace webrtc
