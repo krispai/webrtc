@@ -1046,7 +1046,7 @@ if (is_ios || is_mac) {
 
       configs += [
         "..:common_objc",
-        ":used_from_extension",
+        ":used_from_extension","../modules/audio_processing:apm_debug_dump",
       ]
       public_configs = [ ":common_config_objc" ]
 
