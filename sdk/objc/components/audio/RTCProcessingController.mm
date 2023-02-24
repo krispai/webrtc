@@ -22,24 +22,24 @@
   if (self != nil) {
       _audioProcessorDelegate = processorDelegate;
 
-      ProcessorInitCallback initCallback = [self]() {
+      ProcInitCallback initCallback = [self]() {
           if (_audioProcessorDelegate ) { [_audioProcessorDelegate initializeProcessor]; }
       };
 
-      ProcessorInitializeSessionCallback sessionInitializeCallback = [self](int sample_rate_hz, int num_channels) {
-          if (_audioProcessorDelegate ) { [_audioProcessorDelegate initializeSession: sample_rate_hz numChannels: num_channels]; }
+      ProcSessionInitializeCallback sessionInitializeCallback = [self](const int sampleRateHz, const int numChannels) {
+          if (_audioProcessorDelegate ) { [_audioProcessorDelegate initializeSession: sampleRateHz numChannels: numChannels]; }
       };
 
-      ProcessorDestroyCallback destroyCallback = [self]() {
+      ProcDestroyCallback destroyCallback = [self]() {
           if (_audioProcessorDelegate ) { [_audioProcessorDelegate destroyed]; }
       };
 
-      ProcessorResetCallback resetCallback = [self]() {
+      ProcResetCallback resetCallback = [self]() {
           if (_audioProcessorDelegate ) { [_audioProcessorDelegate reset]; }
       };
 
-      AudioFrameProcessCallback frameProcessCallback = [self](const size_t channelNumber, const size_t num_bands, const size_t bufferSize, float * _Nonnull buffer) {
-          if (_audioProcessorDelegate ) { [_audioProcessorDelegate frameProcess: channelNumber numBands:num_bands  bufferSize: bufferSize  buffer: buffer]; }
+      AudioFrameProcessCallback frameProcessCallback = [self](const size_t numChannel, const size_t numBands, const size_t bufferSize, float * _Nonnull buffer) {
+          if (_audioProcessorDelegate ) { [_audioProcessorDelegate frameProcess: numChannel numBands:numBands  bufferSize: bufferSize  buffer: buffer]; }
       };
 
       _customProcessing = std::make_unique<CustomProcessingImpl>(initCallback, sessionInitializeCallback,

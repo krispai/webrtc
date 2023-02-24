@@ -12,15 +12,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class RTC_OBJC_TYPE(RTCAudioProcessing);
 
-struct AudioFrameBuffer
-{
-    float*  buffer;
-};
-
 RTC_OBJC_EXPORT
 @protocol RTCAudioProcessorDelegate <NSObject>
 - (void)initializeProcessor;
-- (void)initializeSession:(size_t)sampleRate numChannels:(size_t)numChannels;
+- (void)initializeSession:(size_t)sampleRateHz numChannels:(size_t)numChannels;
 - (void)name;
 - (void)frameProcess:(size_t)channelNumber numBands:(size_t)numBands bufferSize:(size_t)bufferSize buffer:(float * _Nonnull)buffer;
 - (void)destroyed;
