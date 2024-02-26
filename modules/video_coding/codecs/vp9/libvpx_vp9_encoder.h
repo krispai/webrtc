@@ -143,8 +143,6 @@ class LibvpxVp9Encoder : public VP9Encoder {
   InterLayerPredMode inter_layer_pred_;
   bool external_ref_control_;
   const bool trusted_rate_controller_;
-  bool layer_buffering_;
-  const bool full_superframe_drop_;
   vpx_svc_frame_drop_t svc_drop_frame_;
   bool first_frame_in_picture_;
   VideoBitrateAllocation current_bitrate_allocation_;
@@ -238,6 +236,14 @@ class LibvpxVp9Encoder : public VP9Encoder {
   bool config_changed_;
 
   const LibvpxVp9EncoderInfoSettings encoder_info_override_;
+
+  const struct SvcFrameDropConfig {
+    bool enabled;
+    int layer_drop_mode;  // SVC_LAYER_DROP_MODE
+    int max_consec_drop;
+  } svc_frame_drop_config_;
+  static SvcFrameDropConfig ParseSvcFrameDropConfig(
+      const FieldTrialsView& trials);
 };
 
 }  // namespace webrtc

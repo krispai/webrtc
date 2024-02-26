@@ -252,7 +252,7 @@ EncodedImageCallback::Result QualityAnalyzingVideoEncoder::OnEncodedImage(
     std::pair<uint32_t, uint16_t> timestamp_frame_id;
     while (!timestamp_to_frame_id_list_.empty()) {
       timestamp_frame_id = timestamp_to_frame_id_list_.front();
-      if (timestamp_frame_id.first == encoded_image.Timestamp()) {
+      if (timestamp_frame_id.first == encoded_image.RtpTimestamp()) {
         break;
       }
       timestamp_to_frame_id_list_.pop_front();
@@ -271,7 +271,7 @@ EncodedImageCallback::Result QualityAnalyzingVideoEncoder::OnEncodedImage(
       // posting frame to it, but then call the callback for this frame.
       RTC_LOG(LS_ERROR) << "QualityAnalyzingVideoEncoder::OnEncodedImage: No "
                            "frame id for encoded_image.Timestamp()="
-                        << encoded_image.Timestamp();
+                        << encoded_image.RtpTimestamp();
       return EncodedImageCallback::Result(
           EncodedImageCallback::Result::Error::OK);
     }
@@ -279,8 +279,14 @@ EncodedImageCallback::Result QualityAnalyzingVideoEncoder::OnEncodedImage(
 
     discard = ShouldDiscard(frame_id, encoded_image);
     if (!discard) {
-      target_encode_bitrate = bitrate_allocation_.GetSpatialLayerSum(
-          encoded_image.SpatialIndex().value_or(0));
+      // We could either have simulcast layers or spatial layers.
+      // TODO(https://crbug.com/webrtc/14891): If we want to support a mix of
+      // simulcast and SVC we'll also need to consider the case where we have
+      // both simulcast and spatial indices.
+      size_t stream_index = encoded_image.SpatialIndex().value_or(
+          encoded_image.SimulcastIndex().value_or(0));
+      target_encode_bitrate =
+          bitrate_allocation_.GetSpatialLayerSum(stream_index);
     }
     codec_name =
         std::string(CodecTypeToPayloadString(codec_settings_.codecType)) + "_" +
@@ -326,7 +332,12 @@ bool QualityAnalyzingVideoEncoder::ShouldDiscard(
   if (!emulated_sfu_config)
     return false;
 
-  int cur_spatial_index = encoded_image.SpatialIndex().value_or(0);
+  // We could either have simulcast layers or spatial layers.
+  // TODO(https://crbug.com/webrtc/14891): If we want to support a mix of
+  // simulcast and SVC we'll also need to consider the case where we have both
+  // simulcast and spatial indices.
+  int cur_stream_index = encoded_image.SpatialIndex().value_or(
+      encoded_image.SimulcastIndex().value_or(0));
   int cur_temporal_index = encoded_image.TemporalIndex().value_or(0);
 
   if (emulated_sfu_config->target_temporal_index &&
@@ -338,12 +349,12 @@ bool QualityAnalyzingVideoEncoder::ShouldDiscard(
       case SimulcastMode::kSimulcast:
         // In simulcast mode only encoded images with required spatial index are
         // interested, so all others have to be discarded.
-        return cur_spatial_index != *emulated_sfu_config->target_layer_index;
+        return cur_stream_index != *emulated_sfu_config->target_layer_index;
       case SimulcastMode::kSVC:
         // In SVC mode encoded images with spatial indexes that are equal or
         // less than required one are interesting, so all above have to be
         // discarded.
-        return cur_spatial_index > *emulated_sfu_config->target_layer_index;
+        return cur_stream_index > *emulated_sfu_config->target_layer_index;
       case SimulcastMode::kKSVC:
         // In KSVC mode for key frame encoded images with spatial indexes that
         // are equal or less than required one are interesting, so all above
@@ -353,8 +364,8 @@ bool QualityAnalyzingVideoEncoder::ShouldDiscard(
         // all of temporal layer 0 for now.
         if (encoded_image._frameType == VideoFrameType::kVideoFrameKey ||
             cur_temporal_index == 0)
-          return cur_spatial_index > *emulated_sfu_config->target_layer_index;
-        return cur_spatial_index != *emulated_sfu_config->target_layer_index;
+          return cur_stream_index > *emulated_sfu_config->target_layer_index;
+        return cur_stream_index != *emulated_sfu_config->target_layer_index;
       case SimulcastMode::kNormal:
         RTC_DCHECK_NOTREACHED() << "Analyzing encoder is in kNormal mode, but "
                                    "target_layer_index is set";

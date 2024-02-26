@@ -15,6 +15,8 @@
 #include <memory>
 #include <vector>
 
+#include "api/environment/environment.h"
+#include "api/environment/environment_factory.h"
 #include "api/video/encoded_image.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_encoder.h"
@@ -101,7 +103,7 @@ class SimulcastTestFixtureImpl::TestEncodedImageCallback
       temporal_layer_[encoded_image.SimulcastIndex().value_or(0)] =
           codec_specific_info->codecSpecific.H264.temporal_idx;
     }
-    return Result(Result::OK, encoded_image.Timestamp());
+    return Result(Result::OK, encoded_image.RtpTimestamp());
   }
   // This method only makes sense for VP8.
   void GetLastEncodedFrameInfo(int* temporal_layer,
@@ -258,8 +260,9 @@ SimulcastTestFixtureImpl::SimulcastTestFixtureImpl(
     std::unique_ptr<VideoDecoderFactory> decoder_factory,
     SdpVideoFormat video_format)
     : codec_type_(PayloadStringToCodecType(video_format.name)) {
+  Environment env = CreateEnvironment();
   encoder_ = encoder_factory->CreateVideoEncoder(video_format);
-  decoder_ = decoder_factory->CreateVideoDecoder(video_format);
+  decoder_ = decoder_factory->Create(env, video_format);
   SetUpCodec((codec_type_ == kVideoCodecVP8 || codec_type_ == kVideoCodecH264)
                  ? kDefaultTemporalLayerProfile
                  : kNoTemporalLayerProfile);
@@ -894,9 +897,9 @@ void SimulcastTestFixtureImpl::TestStrideEncodeDecode() {
   EncodedImage encoded_frame;
   // Only encoding one frame - so will be a key frame.
   encoder_callback.GetLastEncodedKeyFrame(&encoded_frame);
-  EXPECT_EQ(0, decoder_->Decode(encoded_frame, false, 0));
+  EXPECT_EQ(0, decoder_->Decode(encoded_frame, 0));
   encoder_callback.GetLastEncodedFrame(&encoded_frame);
-  decoder_->Decode(encoded_frame, false, 0);
+  decoder_->Decode(encoded_frame, 0);
   EXPECT_EQ(2, decoder_callback.DecodedFrames());
 }
 
@@ -932,7 +935,7 @@ void SimulcastTestFixtureImpl::TestDecodeWidthHeightSet() {
         EXPECT_EQ(decodedImage.width(), kDefaultWidth / 4);
         EXPECT_EQ(decodedImage.height(), kDefaultHeight / 4);
       }));
-  EXPECT_EQ(0, decoder_->Decode(encoded_frame[0], false, 0));
+  EXPECT_EQ(0, decoder_->Decode(encoded_frame[0], 0));
 
   EXPECT_CALL(decoder_callback, Decoded(_, _, _))
       .WillOnce(::testing::Invoke([](VideoFrame& decodedImage,
@@ -941,7 +944,7 @@ void SimulcastTestFixtureImpl::TestDecodeWidthHeightSet() {
         EXPECT_EQ(decodedImage.width(), kDefaultWidth / 2);
         EXPECT_EQ(decodedImage.height(), kDefaultHeight / 2);
       }));
-  EXPECT_EQ(0, decoder_->Decode(encoded_frame[1], false, 0));
+  EXPECT_EQ(0, decoder_->Decode(encoded_frame[1], 0));
 
   EXPECT_CALL(decoder_callback, Decoded(_, _, _))
       .WillOnce(::testing::Invoke([](VideoFrame& decodedImage,
@@ -950,7 +953,7 @@ void SimulcastTestFixtureImpl::TestDecodeWidthHeightSet() {
         EXPECT_EQ(decodedImage.width(), kDefaultWidth);
         EXPECT_EQ(decodedImage.height(), kDefaultHeight);
       }));
-  EXPECT_EQ(0, decoder_->Decode(encoded_frame[2], false, 0));
+  EXPECT_EQ(0, decoder_->Decode(encoded_frame[2], 0));
 }
 
 void SimulcastTestFixtureImpl::

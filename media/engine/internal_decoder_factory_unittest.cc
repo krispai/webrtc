@@ -10,6 +10,8 @@
 
 #include "media/engine/internal_decoder_factory.h"
 
+#include "api/environment/environment.h"
+#include "api/environment/environment_factory.h"
 #include "api/video_codecs/av1_profile.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_decoder.h"
@@ -43,6 +45,8 @@ constexpr bool kDav1dIsIncluded = true;
 #else
 constexpr bool kDav1dIsIncluded = false;
 #endif
+constexpr bool kH265Enabled = false;
+
 constexpr VideoDecoderFactory::CodecSupport kSupported = {
     /*is_supported=*/true, /*is_power_efficient=*/false};
 constexpr VideoDecoderFactory::CodecSupport kUnsupported = {
@@ -54,49 +58,62 @@ MATCHER_P(Support, expected, "") {
 }
 
 TEST(InternalDecoderFactoryTest, Vp8) {
+  const Environment env = CreateEnvironment();
   InternalDecoderFactory factory;
   std::unique_ptr<VideoDecoder> decoder =
-      factory.CreateVideoDecoder(SdpVideoFormat(cricket::kVp8CodecName));
+      factory.Create(env, SdpVideoFormat(cricket::kVp8CodecName));
   EXPECT_TRUE(decoder);
 }
 
 TEST(InternalDecoderFactoryTest, Vp9Profile0) {
+  const Environment env = CreateEnvironment();
   InternalDecoderFactory factory;
-  std::unique_ptr<VideoDecoder> decoder =
-      factory.CreateVideoDecoder(SdpVideoFormat(
-          cricket::kVp9CodecName,
-          {{kVP9FmtpProfileId, VP9ProfileToString(VP9Profile::kProfile0)}}));
+  std::unique_ptr<VideoDecoder> decoder = factory.Create(
+      env, SdpVideoFormat(cricket::kVp9CodecName,
+                          {{kVP9FmtpProfileId,
+                            VP9ProfileToString(VP9Profile::kProfile0)}}));
   EXPECT_EQ(static_cast<bool>(decoder), kVp9Enabled);
 }
 
 TEST(InternalDecoderFactoryTest, Vp9Profile1) {
+  const Environment env = CreateEnvironment();
   InternalDecoderFactory factory;
-  std::unique_ptr<VideoDecoder> decoder =
-      factory.CreateVideoDecoder(SdpVideoFormat(
-          cricket::kVp9CodecName,
-          {{kVP9FmtpProfileId, VP9ProfileToString(VP9Profile::kProfile1)}}));
+  std::unique_ptr<VideoDecoder> decoder = factory.Create(
+      env, SdpVideoFormat(cricket::kVp9CodecName,
+                          {{kVP9FmtpProfileId,
+                            VP9ProfileToString(VP9Profile::kProfile1)}}));
   EXPECT_EQ(static_cast<bool>(decoder), kVp9Enabled);
 }
 
 TEST(InternalDecoderFactoryTest, H264) {
+  const Environment env = CreateEnvironment();
   InternalDecoderFactory factory;
   std::unique_ptr<VideoDecoder> decoder =
-      factory.CreateVideoDecoder(SdpVideoFormat(cricket::kH264CodecName));
+      factory.Create(env, SdpVideoFormat(cricket::kH264CodecName));
   EXPECT_EQ(static_cast<bool>(decoder), kH264Enabled);
 }
 
 TEST(InternalDecoderFactoryTest, Av1Profile0) {
+  const Environment env = CreateEnvironment();
   InternalDecoderFactory factory;
   if (kDav1dIsIncluded) {
     EXPECT_THAT(factory.GetSupportedFormats(),
                 Contains(Field(&SdpVideoFormat::name, cricket::kAv1CodecName)));
-    EXPECT_TRUE(
-        factory.CreateVideoDecoder(SdpVideoFormat(cricket::kAv1CodecName)));
+    EXPECT_TRUE(factory.Create(env, SdpVideoFormat(cricket::kAv1CodecName)));
   } else {
     EXPECT_THAT(
         factory.GetSupportedFormats(),
         Not(Contains(Field(&SdpVideoFormat::name, cricket::kAv1CodecName))));
   }
+}
+
+// At current stage since internal H.265 decoder is not implemented,
+TEST(InternalDecoderFactoryTest, H265IsNotEnabled) {
+  const Environment env = CreateEnvironment();
+  InternalDecoderFactory factory;
+  std::unique_ptr<VideoDecoder> decoder =
+      factory.Create(env, SdpVideoFormat(cricket::kH265CodecName));
+  EXPECT_EQ(static_cast<bool>(decoder), kH265Enabled);
 }
 
 #if defined(RTC_DAV1D_IN_INTERNAL_DECODER_FACTORY)
@@ -108,10 +125,12 @@ TEST(InternalDecoderFactoryTest, Av1) {
 #endif
 
 TEST(InternalDecoderFactoryTest, Av1Profile1_Dav1dDecoderTrialEnabled) {
+  const Environment env = CreateEnvironment();
   InternalDecoderFactory factory;
-  std::unique_ptr<VideoDecoder> decoder = factory.CreateVideoDecoder(
+  std::unique_ptr<VideoDecoder> decoder = factory.Create(
+      env,
       SdpVideoFormat(cricket::kAv1CodecName,
-                     {{kAV1FmtpProfile,
+                     {{cricket::kAv1FmtpProfile,
                        AV1ProfileToString(AV1Profile::kProfile1).data()}}));
   EXPECT_EQ(static_cast<bool>(decoder), kDav1dIsIncluded);
 }

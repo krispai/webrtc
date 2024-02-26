@@ -14,6 +14,7 @@
 #include <memory>
 #include <vector>
 
+#include "api/environment/environment.h"
 #include "api/video_codecs/video_encoder.h"
 #include "api/video_codecs/vp8_frame_buffer_controller.h"
 #include "modules/video_coding/include/video_codec_interface.h"
@@ -40,10 +41,13 @@ class VP8Encoder {
   static std::unique_ptr<VideoEncoder> Create(Settings settings);
 };
 
+// TODO: bugs.webrtc.org/15791 - Delete in favor of the CreateVp8Decoder below.
 class VP8Decoder {
  public:
-  static std::unique_ptr<VideoDecoder> Create();
+  [[deprecated]] static std::unique_ptr<VideoDecoder> Create();
 };
+
+std::unique_ptr<VideoDecoder> CreateVp8Decoder(const Environment& env);
 
 }  // namespace webrtc
 

@@ -34,6 +34,7 @@
 #include "rtc_base/nat_types.h"
 #include "rtc_base/net_helper.h"
 #include "rtc_base/net_helpers.h"
+#include "rtc_base/net_test_helpers.h"
 #include "rtc_base/network.h"
 #include "rtc_base/network_constants.h"
 #include "rtc_base/network_monitor.h"
@@ -49,8 +50,9 @@
 
 using rtc::IPAddress;
 using rtc::SocketAddress;
-using ::testing::Contains;
-using ::testing::Not;
+using testing::Contains;
+using testing::Not;
+using webrtc::IceCandidateType;
 
 #define MAYBE_SKIP_IPV4                        \
   if (!rtc::HasIPv4Enabled()) {                \
@@ -111,8 +113,6 @@ static const char kTurnPassword[] = "test";
 // Add some margin of error for slow bots.
 static const int kStunTimeoutMs = cricket::STUN_TOTAL_TIMEOUT;
 
-constexpr uint64_t kTiebreakerDefault = 44444;
-
 namespace {
 
 void CheckStunKeepaliveIntervalOfAllReadyPorts(
@@ -156,12 +156,13 @@ class BasicPortAllocatorTestBase : public ::testing::Test,
   BasicPortAllocatorTestBase()
       : vss_(new rtc::VirtualSocketServer()),
         fss_(new rtc::FirewallSocketServer(vss_.get())),
+        socket_factory_(fss_.get()),
         thread_(fss_.get()),
         // Note that the NAT is not used by default. ResetWithStunServerAndNat
         // must be called.
         nat_factory_(vss_.get(), kNatUdpAddr, kNatTcpAddr),
         nat_socket_factory_(new rtc::BasicPacketSocketFactory(&nat_factory_)),
-        stun_server_(TestStunServer::Create(fss_.get(), kStunAddr)),
+        stun_server_(TestStunServer::Create(fss_.get(), kStunAddr, thread_)),
         turn_server_(rtc::Thread::Current(),
                      fss_.get(),
                      kTurnUdpIntAddr,
@@ -171,12 +172,9 @@ class BasicPortAllocatorTestBase : public ::testing::Test,
     stun_servers.insert(kStunAddr);
 
     allocator_ = std::make_unique<BasicPortAllocator>(
-        &network_manager_,
-        std::make_unique<rtc::BasicPacketSocketFactory>(fss_.get()),
-        stun_servers, &field_trials_);
+        &network_manager_, &socket_factory_, stun_servers, &field_trials_);
     allocator_->Initialize();
     allocator_->set_step_delay(kMinimumStepDelay);
-    allocator_->SetIceTiebreaker(kTiebreakerDefault);
     webrtc::metrics::Reset();
   }
 
@@ -211,11 +209,9 @@ class BasicPortAllocatorTestBase : public ::testing::Test,
   }
   // Endpoint is on the public network. No STUN or TURN.
   void ResetWithNoServersOrNat() {
-    allocator_.reset(new BasicPortAllocator(
-        &network_manager_,
-        std::make_unique<rtc::BasicPacketSocketFactory>(fss_.get())));
+    allocator_.reset(
+        new BasicPortAllocator(&network_manager_, &socket_factory_));
     allocator_->Initialize();
-    allocator_->SetIceTiebreaker(kTiebreakerDefault);
     allocator_->set_step_delay(kMinimumStepDelay);
   }
   // Endpoint is behind a NAT, with STUN specified.
@@ -300,7 +296,6 @@ class BasicPortAllocatorTestBase : public ::testing::Test,
         this, &BasicPortAllocatorTestBase::OnCandidatesRemoved);
     session->SignalCandidatesAllocationDone.connect(
         this, &BasicPortAllocatorTestBase::OnCandidatesAllocationDone);
-    session->set_ice_tiebreaker(kTiebreakerDefault);
     return session;
   }
 
@@ -329,20 +324,9 @@ class BasicPortAllocatorTestBase : public ::testing::Test,
         });
   }
 
-  static int CountCandidates(const std::vector<Candidate>& candidates,
-                             absl::string_view type,
-                             absl::string_view proto,
-                             const SocketAddress& addr) {
-    return absl::c_count_if(
-        candidates, [type, proto, addr](const Candidate& c) {
-          return c.type() == type && c.protocol() == proto &&
-                 AddressMatch(c.address(), addr);
-        });
-  }
-
   // Find a candidate and return it.
   static bool FindCandidate(const std::vector<Candidate>& candidates,
-                            absl::string_view type,
+                            IceCandidateType type,
                             absl::string_view proto,
                             const SocketAddress& addr,
                             Candidate* found) {
@@ -359,7 +343,7 @@ class BasicPortAllocatorTestBase : public ::testing::Test,
 
   // Convenience method to call FindCandidate with no return.
   static bool HasCandidate(const std::vector<Candidate>& candidates,
-                           absl::string_view type,
+                           IceCandidateType type,
                            absl::string_view proto,
                            const SocketAddress& addr) {
     return FindCandidate(candidates, type, proto, addr, nullptr);
@@ -368,7 +352,7 @@ class BasicPortAllocatorTestBase : public ::testing::Test,
   // Version of HasCandidate that also takes a related address.
   static bool HasCandidateWithRelatedAddr(
       const std::vector<Candidate>& candidates,
-      absl::string_view type,
+      IceCandidateType type,
       absl::string_view proto,
       const SocketAddress& addr,
       const SocketAddress& related_addr) {
@@ -497,8 +481,8 @@ class BasicPortAllocatorTestBase : public ::testing::Test,
                            bool with_nat) {
     if (with_nat) {
       nat_server_.reset(new rtc::NATServer(
-          rtc::NAT_OPEN_CONE, vss_.get(), kNatUdpAddr, kNatTcpAddr, vss_.get(),
-          rtc::SocketAddress(kNatUdpAddr.ipaddr(), 0)));
+          rtc::NAT_OPEN_CONE, thread_, vss_.get(), kNatUdpAddr, kNatTcpAddr,
+          thread_, vss_.get(), rtc::SocketAddress(kNatUdpAddr.ipaddr(), 0)));
     } else {
       nat_socket_factory_ =
           std::make_unique<rtc::BasicPacketSocketFactory>(fss_.get());
@@ -517,11 +501,12 @@ class BasicPortAllocatorTestBase : public ::testing::Test,
 
   std::unique_ptr<rtc::VirtualSocketServer> vss_;
   std::unique_ptr<rtc::FirewallSocketServer> fss_;
+  rtc::BasicPacketSocketFactory socket_factory_;
   rtc::AutoSocketServerThread thread_;
   std::unique_ptr<rtc::NATServer> nat_server_;
   rtc::NATSocketFactory nat_factory_;
   std::unique_ptr<rtc::BasicPacketSocketFactory> nat_socket_factory_;
-  std::unique_ptr<TestStunServer> stun_server_;
+  TestStunServer::StunServerPtr stun_server_;
   TestTurnServer turn_server_;
   rtc::FakeNetworkManager network_manager_;
   std::unique_ptr<BasicPortAllocator> allocator_;
@@ -569,7 +554,7 @@ class BasicPortAllocatorTest : public FakeClockBase,
 
     uint32_t total_candidates = 0;
     if (!host_candidate_addr.IsNil()) {
-      EXPECT_TRUE(HasCandidate(candidates_, "local", "udp",
+      EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
                                rtc::SocketAddress(kPrivateAddr.ipaddr(), 0)));
       ++total_candidates;
     }
@@ -579,20 +564,20 @@ class BasicPortAllocatorTest : public FakeClockBase,
         related_address.SetIP(rtc::GetAnyIP(stun_candidate_addr.family()));
       }
       EXPECT_TRUE(HasCandidateWithRelatedAddr(
-          candidates_, "stun", "udp",
+          candidates_, IceCandidateType::kSrflx, "udp",
           rtc::SocketAddress(stun_candidate_addr, 0), related_address));
       ++total_candidates;
     }
     if (!relay_candidate_udp_transport_addr.IsNil()) {
       EXPECT_TRUE(HasCandidateWithRelatedAddr(
-          candidates_, "relay", "udp",
+          candidates_, IceCandidateType::kRelay, "udp",
           rtc::SocketAddress(relay_candidate_udp_transport_addr, 0),
           rtc::SocketAddress(stun_candidate_addr, 0)));
       ++total_candidates;
     }
     if (!relay_candidate_tcp_transport_addr.IsNil()) {
       EXPECT_TRUE(HasCandidateWithRelatedAddr(
-          candidates_, "relay", "udp",
+          candidates_, IceCandidateType::kRelay, "udp",
           rtc::SocketAddress(relay_candidate_tcp_transport_addr, 0),
           rtc::SocketAddress(stun_candidate_addr, 0)));
       ++total_candidates;
@@ -607,9 +592,8 @@ class BasicPortAllocatorTest : public FakeClockBase,
     // Add two IP addresses on the same interface.
     AddInterface(kClientAddr, "net1");
     AddInterface(kClientIPv6Addr, "net1");
-    allocator_.reset(new BasicPortAllocator(
-        &network_manager_,
-        std::make_unique<rtc::BasicPacketSocketFactory>(fss_.get())));
+    allocator_.reset(
+        new BasicPortAllocator(&network_manager_, &socket_factory_));
     allocator_->Initialize();
     allocator_->SetConfiguration(allocator_->stun_servers(),
                                  allocator_->turn_servers(), 0,
@@ -640,8 +624,9 @@ class BasicPortAllocatorTest : public FakeClockBase,
     const std::vector<Candidate>& ready_candidates =
         session_->ReadyCandidates();
     EXPECT_EQ(3U, ready_candidates.size());
-    EXPECT_TRUE(HasCandidate(ready_candidates, "local", "udp", kClientAddr));
-    EXPECT_TRUE(HasCandidate(ready_candidates, "relay", "udp",
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kHost, "udp",
+                             kClientAddr));
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kRelay, "udp",
                              rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0)));
   }
 
@@ -650,9 +635,8 @@ class BasicPortAllocatorTest : public FakeClockBase,
       bool tcp_pruned) {
     turn_server_.AddInternalSocket(kTurnTcpIntAddr, PROTO_TCP);
     AddInterface(kClientAddr);
-    allocator_.reset(new BasicPortAllocator(
-        &network_manager_,
-        std::make_unique<rtc::BasicPacketSocketFactory>(fss_.get())));
+    allocator_.reset(
+        new BasicPortAllocator(&network_manager_, &socket_factory_));
     allocator_->Initialize();
     allocator_->SetConfiguration(allocator_->stun_servers(),
                                  allocator_->turn_servers(), 0, prune_policy);
@@ -688,10 +672,11 @@ class BasicPortAllocatorTest : public FakeClockBase,
     const std::vector<Candidate>& ready_candidates =
         session_->ReadyCandidates();
     EXPECT_EQ(2U, ready_candidates.size());
-    EXPECT_TRUE(HasCandidate(ready_candidates, "local", "udp", kClientAddr));
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kHost, "udp",
+                             kClientAddr));
 
     // The external candidate is always udp.
-    EXPECT_TRUE(HasCandidate(ready_candidates, "relay", "udp",
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kRelay, "udp",
                              rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0)));
   }
 
@@ -704,9 +689,8 @@ class BasicPortAllocatorTest : public FakeClockBase,
     AddInterface(kClientIPv6Addr, "net1", rtc::ADAPTER_TYPE_WIFI);
     AddInterface(kClientAddr2, "net2", rtc::ADAPTER_TYPE_CELLULAR);
     AddInterface(kClientIPv6Addr2, "net2", rtc::ADAPTER_TYPE_CELLULAR);
-    allocator_.reset(new BasicPortAllocator(
-        &network_manager_,
-        std::make_unique<rtc::BasicPacketSocketFactory>(fss_.get())));
+    allocator_.reset(
+        new BasicPortAllocator(&network_manager_, &socket_factory_));
     allocator_->Initialize();
     allocator_->SetConfiguration(allocator_->stun_servers(),
                                  allocator_->turn_servers(), 0,
@@ -744,19 +728,23 @@ class BasicPortAllocatorTest : public FakeClockBase,
     const std::vector<Candidate>& ready_candidates =
         session_->ReadyCandidates();
     EXPECT_EQ(10U, ready_candidates.size());
-    EXPECT_TRUE(HasCandidate(ready_candidates, "local", "udp", kClientAddr));
-    EXPECT_TRUE(HasCandidate(ready_candidates, "local", "udp", kClientAddr2));
-    EXPECT_TRUE(
-        HasCandidate(ready_candidates, "local", "udp", kClientIPv6Addr));
-    EXPECT_TRUE(
-        HasCandidate(ready_candidates, "local", "udp", kClientIPv6Addr2));
-    EXPECT_TRUE(HasCandidate(ready_candidates, "local", "tcp", kClientAddr));
-    EXPECT_TRUE(HasCandidate(ready_candidates, "local", "tcp", kClientAddr2));
-    EXPECT_TRUE(
-        HasCandidate(ready_candidates, "local", "tcp", kClientIPv6Addr));
-    EXPECT_TRUE(
-        HasCandidate(ready_candidates, "local", "tcp", kClientIPv6Addr2));
-    EXPECT_TRUE(HasCandidate(ready_candidates, "relay", "udp",
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kHost, "udp",
+                             kClientAddr));
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kHost, "udp",
+                             kClientAddr2));
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kHost, "udp",
+                             kClientIPv6Addr));
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kHost, "udp",
+                             kClientIPv6Addr2));
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kHost, "tcp",
+                             kClientAddr));
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kHost, "tcp",
+                             kClientAddr2));
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kHost, "tcp",
+                             kClientIPv6Addr));
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kHost, "tcp",
+                             kClientIPv6Addr2));
+    EXPECT_TRUE(HasCandidate(ready_candidates, IceCandidateType::kRelay, "udp",
                              rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0)));
   }
 };
@@ -834,7 +822,7 @@ TEST_F(BasicPortAllocatorTest,
                              kDefaultAllocationTimeout, fake_clock);
   // Should only get one Wi-Fi candidate.
   EXPECT_EQ(1U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", wifi));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp", wifi));
 }
 
 // Test that when the PORTALLOCATOR_DISABLE_COSTLY_NETWORKS flag is set and
@@ -860,8 +848,10 @@ TEST_F(BasicPortAllocatorTest,
                              kDefaultAllocationTimeout, fake_clock);
   // Should only get two candidates, none of which is cell.
   EXPECT_EQ(2U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", unknown1));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", unknown2));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", unknown1));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", unknown2));
 }
 
 // Test that when the PORTALLOCATOR_DISABLE_COSTLY_NETWORKS flag is set and
@@ -888,7 +878,7 @@ TEST_F(BasicPortAllocatorTest,
                              kDefaultAllocationTimeout, fake_clock);
   // Should only get one Wi-Fi candidate.
   EXPECT_EQ(1U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", wifi));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp", wifi));
 }
 
 // Test that if the PORTALLOCATOR_DISABLE_COSTLY_NETWORKS flag is set, but the
@@ -909,7 +899,8 @@ TEST_F(BasicPortAllocatorTest,
                              kDefaultAllocationTimeout, fake_clock);
   // Make sure we got the cell candidate.
   EXPECT_EQ(1U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", cellular));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", cellular));
 }
 
 // Test that if both PORTALLOCATOR_DISABLE_COSTLY_NETWORKS is set, and there is
@@ -932,8 +923,10 @@ TEST_F(BasicPortAllocatorTest,
                              kDefaultAllocationTimeout, fake_clock);
   // Make sure we got both wifi and cell candidates.
   EXPECT_EQ(2U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", wifi_link_local));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", cellular));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           wifi_link_local));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", cellular));
 }
 
 // Test that if both PORTALLOCATOR_DISABLE_COSTLY_NETWORKS is set, and there is
@@ -959,8 +952,9 @@ TEST_F(BasicPortAllocatorTest,
                              kDefaultAllocationTimeout, fake_clock);
   // Make sure we got only wifi candidates.
   EXPECT_EQ(2U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", wifi));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", wifi_link_local));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp", wifi));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           wifi_link_local));
 }
 
 // Test that the adapter types of the Ethernet and the VPN can be correctly
@@ -1005,8 +999,10 @@ TEST_F(BasicPortAllocatorTest, MaxIpv6NetworksLimitEnforced) {
                              kDefaultAllocationTimeout, fake_clock);
   EXPECT_EQ(2U, candidates_.size());
   // Ensure the expected two interfaces (eth0 and eth1) were used.
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr2));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr2));
 }
 
 // Ensure that allocator.max_ipv6_networks() doesn't prevent IPv4 networks from
@@ -1031,9 +1027,12 @@ TEST_F(BasicPortAllocatorTest, MaxIpv6NetworksLimitDoesNotImpactIpv4Networks) {
   EXPECT_EQ(3U, candidates_.size());
   // Ensure that only one IPv6 interface was used, but both IPv4 interfaces
   // were used.
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr2));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr2));
 }
 
 // Test that we could use loopback interface as host candidate.
@@ -1058,9 +1057,12 @@ TEST_F(BasicPortAllocatorTest, TestGetAllPortsWithMinimumStepDelay) {
                              kDefaultAllocationTimeout, fake_clock);
   EXPECT_EQ(3U, candidates_.size());
   EXPECT_EQ(3U, ports_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "stun", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kSrflx, "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "tcp", kClientAddr));
 }
 
 // Test that when the same network interface is brought down and up, the
@@ -1153,7 +1155,8 @@ TEST_F(BasicPortAllocatorTest, CandidatesRegatheredAfterBindingFails) {
   // a single TCP active candidate, since that doesn't require creating a
   // socket).
   ASSERT_EQ(1U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "tcp", kClientAddr));
   candidate_allocation_done_ = false;
 
   // Now simulate the interface coming up, with the newfound ability to bind
@@ -1165,11 +1168,13 @@ TEST_F(BasicPortAllocatorTest, CandidatesRegatheredAfterBindingFails) {
                              kDefaultAllocationTimeout, fake_clock);
   // Should get UDP and TCP candidate.
   ASSERT_EQ(2U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
   // TODO(deadbeef): This is actually the same active TCP candidate as before.
   // We should extend this test to also verify that a server candidate is
   // gathered.
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "tcp", kClientAddr));
 }
 
 // Verify candidates with default step delay of 1sec.
@@ -1184,7 +1189,8 @@ TEST_F(BasicPortAllocatorTest, TestGetAllPortsWithOneSecondStepDelay) {
   EXPECT_EQ(3U, ports_.size());
 
   ASSERT_EQ_SIMULATED_WAIT(3U, candidates_.size(), 1500, fake_clock);
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "tcp", kClientAddr));
   EXPECT_EQ(3U, ports_.size());
   EXPECT_TRUE(candidate_allocation_done_);
   // If we Stop gathering now, we shouldn't get a second "done" callback.
@@ -1240,7 +1246,7 @@ TEST_F(BasicPortAllocatorTest, TestGetAllPortsPortRange) {
   int num_nonrelay_candidates = 0;
   for (const Candidate& candidate : candidates_) {
     // Check the port number for the UDP/STUN/TCP port objects.
-    if (candidate.type() != RELAY_PORT_TYPE) {
+    if (!candidate.is_relay()) {
       EXPECT_TRUE(CheckPort(candidate.address(), kMinPort, kMaxPort));
       ++num_nonrelay_candidates;
     }
@@ -1271,13 +1277,15 @@ TEST_F(BasicPortAllocatorTest, TestGetAllPortsNoAdapters) {
   // candidate for it is useless and shouldn't be signaled. So we only have
   // STUN/TURN candidates.
   EXPECT_EQ(3U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "stun", "udp",
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kSrflx, "udp",
                            rtc::SocketAddress(kNatUdpAddr.ipaddr(), 0)));
   // Again, two TURN candidates, using UDP/TCP for the first hop to the TURN
   // server.
-  EXPECT_EQ(2,
-            CountCandidates(candidates_, "relay", "udp",
-                            rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0)));
+  rtc::SocketAddress addr(kTurnUdpExtAddr.ipaddr(), 0);
+  EXPECT_EQ(2, absl::c_count_if(candidates_, [&](const Candidate& c) {
+              return c.is_relay() && c.protocol() == "udp" &&
+                     AddressMatch(c.address(), addr);
+            }));
 }
 
 // Test that when enumeration is disabled, we should not have any ports when
@@ -1404,11 +1412,12 @@ TEST_F(BasicPortAllocatorTest, TestDisableUdpTurn) {
   EXPECT_EQ(2U, ports_.size());
   EXPECT_EQ(2U, candidates_.size());
   Candidate turn_candidate;
-  EXPECT_TRUE(FindCandidate(candidates_, "relay", "udp", kTurnUdpExtAddr,
-                            &turn_candidate));
+  EXPECT_TRUE(FindCandidate(candidates_, IceCandidateType::kRelay, "udp",
+                            kTurnUdpExtAddr, &turn_candidate));
   // The TURN candidate should use TCP to contact the TURN server.
   EXPECT_EQ(TCP_PROTOCOL_NAME, turn_candidate.relay_protocol());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "tcp", kClientAddr));
 }
 
 // Test that we can get OnCandidatesAllocationDone callback when all the ports
@@ -1433,7 +1442,8 @@ TEST_F(BasicPortAllocatorTest, TestGetAllPortsNoUdpSockets) {
                              kDefaultAllocationTimeout, fake_clock);
   EXPECT_EQ(1U, candidates_.size());
   EXPECT_EQ(1U, ports_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "tcp", kClientAddr));
 }
 
 // Test that we don't crash or malfunction if we can't create UDP sockets or
@@ -1449,7 +1459,8 @@ TEST_F(BasicPortAllocatorTest, TestGetAllPortsNoUdpSocketsNoTcpListen) {
                              kDefaultAllocationTimeout, fake_clock);
   EXPECT_EQ(1U, candidates_.size());
   EXPECT_EQ(1U, ports_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "tcp", kClientAddr));
 }
 
 // Test that we don't crash or malfunction if we can't create any sockets.
@@ -1475,8 +1486,10 @@ TEST_F(BasicPortAllocatorTest, TestGetAllPortsNoUdpAllowed) {
   EXPECT_EQ_SIMULATED_WAIT(2U, candidates_.size(), kDefaultAllocationTimeout,
                            fake_clock);
   EXPECT_EQ(2U, ports_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "tcp", kClientAddr));
   // We wait at least for a full STUN timeout, which
   // cricket::STUN_TOTAL_TIMEOUT seconds.
   EXPECT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
@@ -1546,12 +1559,12 @@ TEST_F(BasicPortAllocatorTest, TestCandidateFilterWithRelayOnly) {
   session_->StartGettingPorts();
   EXPECT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
                              kDefaultAllocationTimeout, fake_clock);
-  EXPECT_TRUE(HasCandidate(candidates_, "relay", "udp",
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kRelay, "udp",
                            rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0)));
 
   EXPECT_EQ(1U, candidates_.size());
   EXPECT_EQ(1U, ports_.size());  // Only Relay port will be in ready state.
-  EXPECT_EQ(std::string(RELAY_PORT_TYPE), candidates_[0].type());
+  EXPECT_TRUE(candidates_[0].is_relay());
   EXPECT_EQ(
       candidates_[0].related_address(),
       rtc::EmptySocketAddressWithFamily(candidates_[0].address().family()));
@@ -1568,7 +1581,7 @@ TEST_F(BasicPortAllocatorTest, TestCandidateFilterWithHostOnly) {
   EXPECT_EQ(2U, candidates_.size());  // Host UDP/TCP candidates only.
   EXPECT_EQ(2U, ports_.size());       // UDP/TCP ports only.
   for (const Candidate& candidate : candidates_) {
-    EXPECT_EQ(std::string(LOCAL_PORT_TYPE), candidate.type());
+    EXPECT_TRUE(candidate.is_local());
   }
 }
 
@@ -1587,7 +1600,7 @@ TEST_F(BasicPortAllocatorTest, TestCandidateFilterWithReflexiveOnly) {
   // port with STUN candidate will be sent outside.
   EXPECT_EQ(1U, candidates_.size());  // Only STUN candidate.
   EXPECT_EQ(1U, ports_.size());       // Only UDP port will be in ready state.
-  EXPECT_EQ(std::string(STUN_PORT_TYPE), candidates_[0].type());
+  EXPECT_TRUE(candidates_[0].is_stun());
   EXPECT_EQ(
       candidates_[0].related_address(),
       rtc::EmptySocketAddressWithFamily(candidates_[0].address().family()));
@@ -1606,7 +1619,7 @@ TEST_F(BasicPortAllocatorTest, TestCandidateFilterWithReflexiveOnlyAndNoNAT) {
   EXPECT_EQ(2U, candidates_.size());  // Local UDP + TCP candidate.
   EXPECT_EQ(2U, ports_.size());  //  UDP and TCP ports will be in ready state.
   for (const Candidate& candidate : candidates_) {
-    EXPECT_EQ(std::string(LOCAL_PORT_TYPE), candidate.type());
+    EXPECT_TRUE(candidate.is_local());
   }
 }
 
@@ -1618,9 +1631,12 @@ TEST_F(BasicPortAllocatorTest, TestEnableSharedUfrag) {
   ASSERT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
                              kDefaultAllocationTimeout, fake_clock);
   EXPECT_EQ(3U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "stun", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kSrflx, "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "tcp", kClientAddr));
   EXPECT_EQ(3U, ports_.size());
   for (const Candidate& candidate : candidates_) {
     EXPECT_EQ(kIceUfrag0, candidate.username());
@@ -1641,7 +1657,8 @@ TEST_F(BasicPortAllocatorTest, TestSharedSocketWithoutNat) {
   ASSERT_EQ_SIMULATED_WAIT(2U, candidates_.size(), kDefaultAllocationTimeout,
                            fake_clock);
   EXPECT_EQ(2U, ports_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
   EXPECT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
                              kDefaultAllocationTimeout, fake_clock);
 }
@@ -1660,8 +1677,9 @@ TEST_F(BasicPortAllocatorTest, TestSharedSocketWithNat) {
   ASSERT_EQ_SIMULATED_WAIT(3U, candidates_.size(), kDefaultAllocationTimeout,
                            fake_clock);
   ASSERT_EQ(2U, ports_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "stun", "udp",
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kSrflx, "udp",
                            rtc::SocketAddress(kNatUdpAddr.ipaddr(), 0)));
   EXPECT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
                              kDefaultAllocationTimeout, fake_clock);
@@ -1672,9 +1690,7 @@ TEST_F(BasicPortAllocatorTest, TestSharedSocketWithNat) {
 TEST_F(BasicPortAllocatorTest, TestSharedSocketWithoutNatUsingTurn) {
   turn_server_.AddInternalSocket(kTurnTcpIntAddr, PROTO_TCP);
   AddInterface(kClientAddr);
-  allocator_.reset(new BasicPortAllocator(
-      &network_manager_,
-      std::make_unique<rtc::BasicPacketSocketFactory>(fss_.get())));
+  allocator_.reset(new BasicPortAllocator(&network_manager_, &socket_factory_));
   allocator_->Initialize();
 
   AddTurnServers(kTurnUdpIntAddr, kTurnTcpIntAddr);
@@ -1691,10 +1707,11 @@ TEST_F(BasicPortAllocatorTest, TestSharedSocketWithoutNatUsingTurn) {
                              kDefaultAllocationTimeout, fake_clock);
   ASSERT_EQ(3U, candidates_.size());
   ASSERT_EQ(3U, ports_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "relay", "udp",
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kRelay, "udp",
                            rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0)));
-  EXPECT_TRUE(HasCandidate(candidates_, "relay", "udp",
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kRelay, "udp",
                            rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0)));
 }
 
@@ -1809,9 +1826,7 @@ TEST_F(BasicPortAllocatorTestWithRealClock,
   turn_server_.AddInternalSocket(rtc::SocketAddress("127.0.0.1", 3478),
                                  PROTO_UDP);
   AddInterface(kClientAddr);
-  allocator_.reset(new BasicPortAllocator(
-      &network_manager_,
-      std::make_unique<rtc::BasicPacketSocketFactory>(fss_.get())));
+  allocator_.reset(new BasicPortAllocator(&network_manager_, &socket_factory_));
   allocator_->Initialize();
   RelayServerConfig turn_server;
   RelayCredentials credentials(kTurnUsername, kTurnPassword);
@@ -1851,10 +1866,11 @@ TEST_F(BasicPortAllocatorTest, TestSharedSocketWithNatUsingTurn) {
                              kDefaultAllocationTimeout, fake_clock);
   EXPECT_EQ(3U, candidates_.size());
   ASSERT_EQ(2U, ports_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "stun", "udp",
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kSrflx, "udp",
                            rtc::SocketAddress(kNatUdpAddr.ipaddr(), 0)));
-  EXPECT_TRUE(HasCandidate(candidates_, "relay", "udp",
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kRelay, "udp",
                            rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0)));
   EXPECT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
                              kDefaultAllocationTimeout, fake_clock);
@@ -1889,13 +1905,14 @@ TEST_F(BasicPortAllocatorTest, TestSharedSocketWithNatUsingTurnAsStun) {
   ASSERT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
                              kDefaultAllocationTimeout, fake_clock);
   EXPECT_EQ(3U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
   Candidate stun_candidate;
-  EXPECT_TRUE(FindCandidate(candidates_, "stun", "udp",
+  EXPECT_TRUE(FindCandidate(candidates_, IceCandidateType::kSrflx, "udp",
                             rtc::SocketAddress(kNatUdpAddr.ipaddr(), 0),
                             &stun_candidate));
   EXPECT_TRUE(HasCandidateWithRelatedAddr(
-      candidates_, "relay", "udp",
+      candidates_, IceCandidateType::kRelay, "udp",
       rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0),
       stun_candidate.address()));
 
@@ -1926,8 +1943,9 @@ TEST_F(BasicPortAllocatorTest, TestSharedSocketWithNatUsingTurnTcpOnly) {
                              kDefaultAllocationTimeout, fake_clock);
   EXPECT_EQ(2U, candidates_.size());
   ASSERT_EQ(2U, ports_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "relay", "udp",
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kRelay, "udp",
                            rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0)));
   EXPECT_EQ(1U, ports_[0]->Candidates().size());
   EXPECT_EQ(1U, ports_[1]->Candidates().size());
@@ -1953,13 +1971,14 @@ TEST_F(BasicPortAllocatorTest, TestNonSharedSocketWithNatUsingTurnAsStun) {
                              kDefaultAllocationTimeout, fake_clock);
   EXPECT_EQ(3U, candidates_.size());
   ASSERT_EQ(3U, ports_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
   Candidate stun_candidate;
-  EXPECT_TRUE(FindCandidate(candidates_, "stun", "udp",
+  EXPECT_TRUE(FindCandidate(candidates_, IceCandidateType::kSrflx, "udp",
                             rtc::SocketAddress(kNatUdpAddr.ipaddr(), 0),
                             &stun_candidate));
   Candidate turn_candidate;
-  EXPECT_TRUE(FindCandidate(candidates_, "relay", "udp",
+  EXPECT_TRUE(FindCandidate(candidates_, IceCandidateType::kRelay, "udp",
                             rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0),
                             &turn_candidate));
   // Not using shared socket, so the STUN request's server reflexive address
@@ -1990,13 +2009,14 @@ TEST_F(BasicPortAllocatorTest, TestSharedSocketWithNatUsingTurnAndStun) {
 
   ASSERT_EQ_SIMULATED_WAIT(3U, candidates_.size(), kDefaultAllocationTimeout,
                            fake_clock);
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
   Candidate stun_candidate;
-  EXPECT_TRUE(FindCandidate(candidates_, "stun", "udp",
+  EXPECT_TRUE(FindCandidate(candidates_, IceCandidateType::kSrflx, "udp",
                             rtc::SocketAddress(kNatUdpAddr.ipaddr(), 0),
                             &stun_candidate));
   EXPECT_TRUE(HasCandidateWithRelatedAddr(
-      candidates_, "relay", "udp",
+      candidates_, IceCandidateType::kRelay, "udp",
       rtc::SocketAddress(kTurnUdpExtAddr.ipaddr(), 0),
       stun_candidate.address()));
 
@@ -2018,7 +2038,8 @@ TEST_F(BasicPortAllocatorTest, TestSharedSocketNoUdpAllowed) {
   ASSERT_EQ_SIMULATED_WAIT(1U, ports_.size(), kDefaultAllocationTimeout,
                            fake_clock);
   EXPECT_EQ(1U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
   // STUN timeout is 9.5sec. We need to wait to get candidate done signal.
   EXPECT_TRUE_SIMULATED_WAIT(candidate_allocation_done_, kStunTimeoutMs,
                              fake_clock);
@@ -2044,7 +2065,8 @@ TEST_F(BasicPortAllocatorTest, TestNetworkPermissionBlocked) {
   EXPECT_EQ_SIMULATED_WAIT(1U, ports_.size(), kDefaultAllocationTimeout,
                            fake_clock);
   EXPECT_EQ(1U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kPrivateAddr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kPrivateAddr));
   EXPECT_NE(0U, session_->flags() & PORTALLOCATOR_DISABLE_ADAPTER_ENUMERATION);
 }
 
@@ -2062,10 +2084,14 @@ TEST_F(BasicPortAllocatorTest, TestEnableIPv6Addresses) {
                              kDefaultAllocationTimeout, fake_clock);
   EXPECT_EQ(4U, ports_.size());
   EXPECT_EQ(4U, candidates_.size());
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientAddr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientIPv6Addr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "tcp", kClientAddr));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "udp", kClientAddr));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "tcp",
+                           kClientIPv6Addr));
+  EXPECT_TRUE(
+      HasCandidate(candidates_, IceCandidateType::kHost, "tcp", kClientAddr));
 }
 
 TEST_F(BasicPortAllocatorTest, TestStopGettingPorts) {
@@ -2181,7 +2207,7 @@ TEST_F(BasicPortAllocatorTest, TestSetCandidateFilterAfterCandidatesGathered) {
   }
   for (const Candidate& candidate : candidates) {
     // Expect only relay candidates now that the filter is applied.
-    EXPECT_EQ(std::string(RELAY_PORT_TYPE), candidate.type());
+    EXPECT_TRUE(candidate.is_relay());
     // Expect that the raddr is emptied due to the CF_RELAY filter.
     EXPECT_EQ(candidate.related_address(),
               rtc::EmptySocketAddressWithFamily(candidate.address().family()));
@@ -2217,21 +2243,21 @@ TEST_F(BasicPortAllocatorTest,
   session_->SetCandidateFilter(CF_RELAY);
   ASSERT_EQ_SIMULATED_WAIT(1u, candidates_.size(), kDefaultAllocationTimeout,
                            fake_clock);
-  EXPECT_EQ(RELAY_PORT_TYPE, candidates_.back().type());
+  EXPECT_TRUE(candidates_.back().is_relay());
   EXPECT_EQ(1u, ports_.size());
 
   // Surface the srflx candidate previously gathered but not signaled.
   session_->SetCandidateFilter(CF_RELAY | CF_REFLEXIVE);
   ASSERT_EQ_SIMULATED_WAIT(2u, candidates_.size(), kDefaultAllocationTimeout,
                            fake_clock);
-  EXPECT_EQ(STUN_PORT_TYPE, candidates_.back().type());
+  EXPECT_TRUE(candidates_.back().is_stun());
   EXPECT_EQ(2u, ports_.size());
 
   // Surface the srflx candidate previously gathered but not signaled.
   session_->SetCandidateFilter(CF_ALL);
   ASSERT_EQ_SIMULATED_WAIT(3u, candidates_.size(), kDefaultAllocationTimeout,
                            fake_clock);
-  EXPECT_EQ(LOCAL_PORT_TYPE, candidates_.back().type());
+  EXPECT_TRUE(candidates_.back().is_local());
   EXPECT_EQ(2u, ports_.size());
 }
 
@@ -2267,21 +2293,21 @@ TEST_F(
   session_->SetCandidateFilter(CF_RELAY);
   EXPECT_EQ_SIMULATED_WAIT(1u, candidates_.size(), kDefaultAllocationTimeout,
                            fake_clock);
-  EXPECT_EQ(RELAY_PORT_TYPE, candidates_.back().type());
+  EXPECT_TRUE(candidates_.back().is_relay());
   EXPECT_EQ(1u, ports_.size());
 
   // Surface the srflx candidate previously gathered but not signaled.
   session_->SetCandidateFilter(CF_REFLEXIVE);
   EXPECT_EQ_SIMULATED_WAIT(2u, candidates_.size(), kDefaultAllocationTimeout,
                            fake_clock);
-  EXPECT_EQ(STUN_PORT_TYPE, candidates_.back().type());
+  EXPECT_TRUE(candidates_.back().is_stun());
   EXPECT_EQ(2u, ports_.size());
 
   // Surface the host candidate previously gathered but not signaled.
   session_->SetCandidateFilter(CF_HOST);
   EXPECT_EQ_SIMULATED_WAIT(3u, candidates_.size(), kDefaultAllocationTimeout,
                            fake_clock);
-  EXPECT_EQ(LOCAL_PORT_TYPE, candidates_.back().type());
+  EXPECT_TRUE(candidates_.back().is_local());
   // We use a shared socket and cricket::UDPPort handles the srflx candidate.
   EXPECT_EQ(2u, ports_.size());
 }
@@ -2397,24 +2423,6 @@ TEST_F(BasicPortAllocatorTest,
                                             expected_stun_keepalive_interval);
 }
 
-TEST_F(BasicPortAllocatorTest, IceRegatheringMetricsLoggedWhenNetworkChanges) {
-  // Only test local ports to simplify test.
-  ResetWithNoServersOrNat();
-  AddInterface(kClientAddr, "test_net0");
-  ASSERT_TRUE(CreateSession(ICE_CANDIDATE_COMPONENT_RTP));
-  session_->StartGettingPorts();
-  EXPECT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
-                             kDefaultAllocationTimeout, fake_clock);
-  candidate_allocation_done_ = false;
-  AddInterface(kClientAddr2, "test_net1");
-  EXPECT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
-                             kDefaultAllocationTimeout, fake_clock);
-  EXPECT_METRIC_EQ(1,
-                   webrtc::metrics::NumEvents(
-                       "WebRTC.PeerConnection.IceRegatheringReason",
-                       static_cast<int>(IceRegatheringReason::NETWORK_CHANGE)));
-}
-
 // Test that when an mDNS responder is present, the local address of a host
 // candidate is concealed by an mDNS hostname and the related address of a srflx
 // candidate is set to 0.0.0.0 or ::0.
@@ -2442,7 +2450,7 @@ TEST_F(BasicPortAllocatorTest, HostCandidateAddressIsReplacedByHostname) {
   for (const auto& candidate : candidates_) {
     const auto& raddr = candidate.related_address();
 
-    if (candidate.type() == LOCAL_PORT_TYPE) {
+    if (candidate.is_local()) {
       EXPECT_FALSE(candidate.address().hostname().empty());
       EXPECT_TRUE(raddr.IsNil());
       if (candidate.protocol() == UDP_PROTOCOL_NAME) {
@@ -2450,13 +2458,13 @@ TEST_F(BasicPortAllocatorTest, HostCandidateAddressIsReplacedByHostname) {
       } else {
         ++num_host_tcp_candidates;
       }
-    } else if (candidate.type() == STUN_PORT_TYPE) {
+    } else if (candidate.is_stun()) {
       // For a srflx candidate, the related address should be set to 0.0.0.0 or
       // ::0
       EXPECT_TRUE(IPIsAny(raddr.ipaddr()));
       EXPECT_EQ(raddr.port(), 0);
       ++num_srflx_candidates;
-    } else if (candidate.type() == RELAY_PORT_TYPE) {
+    } else if (candidate.is_relay()) {
       EXPECT_EQ(kNatUdpAddr.ipaddr(), raddr.ipaddr());
       EXPECT_EQ(kNatUdpAddr.family(), raddr.family());
       ++num_relay_candidates;
@@ -2649,69 +2657,7 @@ TEST_F(BasicPortAllocatorTest, IPv6EtherAndWifiHaveHigherPriorityThanOthers) {
   EXPECT_TRUE(HasNetwork(networks, ethe1));
 }
 
-// Do not change the default IPv6 selection behavior if
-// IPv6NetworkResolutionFixes is disabled.
-TEST_F(BasicPortAllocatorTest,
-       NotDiversifyIPv6NetworkTypesIfIPv6NetworkResolutionFixesDisabled) {
-  webrtc::test::ScopedKeyValueConfig field_trials(
-      field_trials_, "WebRTC-IPv6NetworkResolutionFixes/Disabled/");
-  // Add three IPv6 network interfaces, but tell the allocator to only use two.
-  allocator().set_max_ipv6_networks(2);
-  AddInterface(kClientIPv6Addr, "ethe1", rtc::ADAPTER_TYPE_ETHERNET);
-  AddInterface(kClientIPv6Addr2, "ethe2", rtc::ADAPTER_TYPE_ETHERNET);
-  AddInterface(kClientIPv6Addr3, "wifi1", rtc::ADAPTER_TYPE_WIFI);
-  // To simplify the test, only gather UDP host candidates.
-  allocator().set_flags(PORTALLOCATOR_ENABLE_IPV6 | PORTALLOCATOR_DISABLE_TCP |
-                        PORTALLOCATOR_DISABLE_STUN |
-                        PORTALLOCATOR_DISABLE_RELAY |
-                        PORTALLOCATOR_ENABLE_IPV6_ON_WIFI);
-
-  ASSERT_TRUE(CreateSession(cricket::ICE_CANDIDATE_COMPONENT_RTP));
-  session_->StartGettingPorts();
-  EXPECT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
-                             kDefaultAllocationTimeout, fake_clock);
-
-  EXPECT_EQ(2U, candidates_.size());
-  // Wifi1 was not selected because it comes after ethe1 and ethe2.
-  EXPECT_FALSE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr3));
-}
-
-// Do not change the default IPv6 selection behavior if
-// IPv6NetworkResolutionFixes is enabled but DiversifyIpv6Interfaces is not
-// enabled.
-TEST_F(BasicPortAllocatorTest,
-       NotDiversifyIPv6NetworkTypesIfDiversifyIpv6InterfacesDisabled) {
-  webrtc::test::ScopedKeyValueConfig field_trials(
-      field_trials_,
-      "WebRTC-IPv6NetworkResolutionFixes/"
-      "Enabled,DiversifyIpv6Interfaces:false/");
-  // Add three IPv6 network interfaces, but tell the allocator to only use two.
-  allocator().set_max_ipv6_networks(2);
-  AddInterface(kClientIPv6Addr, "ethe1", rtc::ADAPTER_TYPE_ETHERNET);
-  AddInterface(kClientIPv6Addr2, "ethe2", rtc::ADAPTER_TYPE_ETHERNET);
-  AddInterface(kClientIPv6Addr3, "wifi1", rtc::ADAPTER_TYPE_WIFI);
-  // To simplify the test, only gather UDP host candidates.
-  allocator().set_flags(PORTALLOCATOR_ENABLE_IPV6 | PORTALLOCATOR_DISABLE_TCP |
-                        PORTALLOCATOR_DISABLE_STUN |
-                        PORTALLOCATOR_DISABLE_RELAY |
-                        PORTALLOCATOR_ENABLE_IPV6_ON_WIFI);
-
-  ASSERT_TRUE(CreateSession(cricket::ICE_CANDIDATE_COMPONENT_RTP));
-  session_->StartGettingPorts();
-  EXPECT_TRUE_SIMULATED_WAIT(candidate_allocation_done_,
-                             kDefaultAllocationTimeout, fake_clock);
-
-  EXPECT_EQ(2U, candidates_.size());
-  // Wifi1 was not selected because it comes after ethe1 and ethe2.
-  EXPECT_FALSE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr3));
-}
-
-TEST_F(BasicPortAllocatorTest,
-       Select2DifferentIntefacesIfDiversifyIpv6InterfacesEnabled) {
-  webrtc::test::ScopedKeyValueConfig field_trials(
-      field_trials_,
-      "WebRTC-IPv6NetworkResolutionFixes/"
-      "Enabled,DiversifyIpv6Interfaces:true/");
+TEST_F(BasicPortAllocatorTest, Select2DifferentIntefaces) {
   allocator().set_max_ipv6_networks(2);
   AddInterface(kClientIPv6Addr, "ethe1", rtc::ADAPTER_TYPE_ETHERNET);
   AddInterface(kClientIPv6Addr2, "ethe2", rtc::ADAPTER_TYPE_ETHERNET);
@@ -2732,16 +2678,13 @@ TEST_F(BasicPortAllocatorTest,
 
   EXPECT_EQ(2U, candidates_.size());
   // ethe1 and wifi1 were selected.
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr3));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr3));
 }
 
-TEST_F(BasicPortAllocatorTest,
-       Select3DifferentIntefacesIfDiversifyIpv6InterfacesEnabled) {
-  webrtc::test::ScopedKeyValueConfig field_trials(
-      field_trials_,
-      "WebRTC-IPv6NetworkResolutionFixes/"
-      "Enabled,DiversifyIpv6Interfaces:true/");
+TEST_F(BasicPortAllocatorTest, Select3DifferentIntefaces) {
   allocator().set_max_ipv6_networks(3);
   AddInterface(kClientIPv6Addr, "ethe1", rtc::ADAPTER_TYPE_ETHERNET);
   AddInterface(kClientIPv6Addr2, "ethe2", rtc::ADAPTER_TYPE_ETHERNET);
@@ -2762,17 +2705,15 @@ TEST_F(BasicPortAllocatorTest,
 
   EXPECT_EQ(3U, candidates_.size());
   // ethe1, wifi1, and cell1 were selected.
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr3));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr5));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr3));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr5));
 }
 
-TEST_F(BasicPortAllocatorTest,
-       Select4DifferentIntefacesIfDiversifyIpv6InterfacesEnabled) {
-  webrtc::test::ScopedKeyValueConfig field_trials(
-      field_trials_,
-      "WebRTC-IPv6NetworkResolutionFixes/"
-      "Enabled,DiversifyIpv6Interfaces:true/");
+TEST_F(BasicPortAllocatorTest, Select4DifferentIntefaces) {
   allocator().set_max_ipv6_networks(4);
   AddInterface(kClientIPv6Addr, "ethe1", rtc::ADAPTER_TYPE_ETHERNET);
   AddInterface(kClientIPv6Addr2, "ethe2", rtc::ADAPTER_TYPE_ETHERNET);
@@ -2793,10 +2734,14 @@ TEST_F(BasicPortAllocatorTest,
 
   EXPECT_EQ(4U, candidates_.size());
   // ethe1, ethe2, wifi1, and cell1 were selected.
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr2));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr3));
-  EXPECT_TRUE(HasCandidate(candidates_, "local", "udp", kClientIPv6Addr5));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr2));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr3));
+  EXPECT_TRUE(HasCandidate(candidates_, IceCandidateType::kHost, "udp",
+                           kClientIPv6Addr5));
 }
 
 }  // namespace cricket
