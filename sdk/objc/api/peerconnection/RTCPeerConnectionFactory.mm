@@ -41,7 +41,6 @@
 #include "modules/audio_device/include/audio_device.h"
 #include "modules/audio_processing/include/audio_processing.h"
 
-#include "sdk/objc/native/api/objc_audio_device_module.h"
 #include "sdk/objc/native/api/video_decoder_factory.h"
 #include "sdk/objc/native/api/video_encoder_factory.h"
 #include "sdk/objc/native/src/objc_video_decoder_factory.h"
@@ -49,7 +48,19 @@
 
 #if defined(WEBRTC_IOS)
 #import "sdk/objc/native/api/audio_device_module.h"
+#include "sdk/objc/native/api/audio_processing_module.h"
 #endif
+
+#import "RTCPeerConnectionFactoryBuilder.h"
+
+#include "api/audio_codecs/audio_decoder_factory.h"
+#include "api/audio_codecs/audio_encoder_factory.h"
+#include "api/video_codecs/video_decoder_factory.h"
+#include "api/video_codecs/video_encoder_factory.h"
+#include "modules/audio_device/include/audio_device.h"
+#include "modules/audio_processing/include/audio_processing.h"
+#include "components/audio/RTCAudioProcessing.h"
+#include "components/audio/RTCProcessingController.h"
 
 @implementation RTC_OBJC_TYPE (RTCPeerConnectionFactory) {
   std::unique_ptr<rtc::Thread> _networkThread;
@@ -66,6 +77,54 @@
 #else
   return nullptr;
 #endif
+}
+
++ (rtc::scoped_refptr<webrtc::AudioDeviceModule>)getAudioDeviceModule {
+#if defined(WEBRTC_IOS)
+  return webrtc::CreateAudioDeviceModule();
+#else
+  return nullptr;
+#endif
+}
+
++ (RTCPeerConnectionFactory *)setup:(nullable id<RTC_OBJC_TYPE(RTCVideoEncoderFactory)>)encoderFactory
+                              decoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoDecoderFactory)>)decoderFactory
+                              audioProcessorDelegate:(id<RTC_OBJC_TYPE(RTCAudioProcessorDelegate)>)audioProcessorDelegate {
+
+  std::unique_ptr<webrtc::VideoEncoderFactory> native_encoder_factory;
+  std::unique_ptr<webrtc::VideoDecoderFactory> native_decoder_factory;
+  rtc::scoped_refptr<webrtc::AudioProcessing> native_audio_processing;
+
+  rtc::scoped_refptr<webrtc::AudioEncoderFactory> audio_encoder_factory;
+  rtc::scoped_refptr<webrtc::AudioDecoderFactory> audio_decoder_factory;
+
+  if (encoderFactory) {
+    native_encoder_factory = webrtc::ObjCToNativeVideoEncoderFactory(encoderFactory);
+  }
+  if (decoderFactory) {
+    native_decoder_factory = webrtc::ObjCToNativeVideoDecoderFactory(decoderFactory);
+  }
+
+  RTCAudioProcessing*  audioProcessingModule = [audioProcessorDelegate getProcessingModule];
+  if (audioProcessingModule) {
+    native_audio_processing = webrtc::ObjCToNativeAudioProcessingModule(audioProcessingModule);
+  }
+
+  rtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module;
+  audio_device_module = [RTCPeerConnectionFactory getAudioDeviceModule];
+
+  audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
+  audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
+
+  RTCPeerConnectionFactoryBuilder* factoryBuilder = [RTCPeerConnectionFactoryBuilder builder];
+  [factoryBuilder setVideoEncoderFactory: std::move(native_encoder_factory)];
+  [factoryBuilder setVideoDecoderFactory: std::move(native_decoder_factory)];
+  [factoryBuilder setAudioEncoderFactory: std::move(audio_encoder_factory)];
+  [factoryBuilder setAudioDecoderFactory: std::move(audio_decoder_factory)];
+  [factoryBuilder setAudioDeviceModule: audio_device_module];
+  [factoryBuilder setAudioProcessingModule: std::move(native_audio_processing)];
+
+  return [factoryBuilder createPeerConnectionFactory];
 }
 
 - (instancetype)init {

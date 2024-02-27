@@ -519,6 +519,8 @@ if (is_ios || is_mac) {
       sources = [
         "objc/native/api/objc_audio_device_module.h",
         "objc/native/api/objc_audio_device_module.mm",
+        "objc/native/api/audio_processing_module.h",
+        "objc/native/api/audio_processing_module.mm",
       ]
 
       deps = [
@@ -924,6 +926,10 @@ if (is_ios || is_mac) {
       ]
       configs += [ "..:no_global_constructors" ]
       sources = [
+        "objc/components/audio/RTCProcessingController.h",
+        "objc/components/audio/RTCProcessingController.mm",
+        "objc/components/audio/RTCAudioProcessing.h",
+        "objc/components/audio/RTCAudioProcessing.mm",
         "objc/api/peerconnection/RTCAudioSource+Private.h",
         "objc/api/peerconnection/RTCAudioSource.h",
         "objc/api/peerconnection/RTCAudioSource.mm",
@@ -1031,7 +1037,7 @@ if (is_ios || is_mac) {
 
       configs += [
         "..:common_objc",
-        ":used_from_extension",
+        ":used_from_extension","../modules/audio_processing:apm_debug_dump",
       ]
       public_configs = [ ":common_config_objc" ]
 
@@ -1248,6 +1254,7 @@ if (is_ios || is_mac) {
         output_name = "WebRTC"
 
         common_objc_headers = [
+          "objc/components/audio/RTCProcessingController.h",
           "objc/base/RTCCodecSpecificInfo.h",
           "objc/base/RTCEncodedImage.h",
           "objc/base/RTCI420Buffer.h",
@@ -1289,6 +1296,7 @@ if (is_ios || is_mac) {
           "objc/helpers/RTCCameraPreviewView.h",
           "objc/helpers/RTCDispatcher.h",
           "objc/helpers/UIDevice+RTCDevice.h",
+          "objc/components/audio/RTCAudioProcessing.h",
           "objc/api/peerconnection/RTCAudioSource.h",
           "objc/api/peerconnection/RTCAudioTrack.h",
           "objc/api/peerconnection/RTCConfiguration.h",

@@ -23,6 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
 @class RTC_OBJC_TYPE(RTCVideoSource);
 @class RTC_OBJC_TYPE(RTCVideoTrack);
 @class RTC_OBJC_TYPE(RTCPeerConnectionFactoryOptions);
+@class RTC_OBJC_TYPE(RTCAudioProcessing);
 @protocol RTC_OBJC_TYPE
 (RTCPeerConnectionDelegate);
 @protocol RTC_OBJC_TYPE
@@ -33,9 +34,17 @@ NS_ASSUME_NONNULL_BEGIN
 (RTCSSLCertificateVerifier);
 @protocol RTC_OBJC_TYPE
 (RTCAudioDevice);
+@protocol RTC_OBJC_TYPE
+(RTCAudioProcessing);
+@protocol RTC_OBJC_TYPE
+(RTCAudioProcessorDelegate);
 
 RTC_OBJC_EXPORT
 @interface RTC_OBJC_TYPE (RTCPeerConnectionFactory) : NSObject
+
++ (RTCPeerConnectionFactory *)setup:(nullable id<RTC_OBJC_TYPE(RTCVideoEncoderFactory)>)encoderFactory
+                              decoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoDecoderFactory)>)decoderFactory
+                              audioProcessorDelegate:(id<RTC_OBJC_TYPE(RTCAudioProcessorDelegate)>)audioProcessorDelegate;
 
 /* Initialize object with default H264 video encoder/decoder factories and default ADM */
 - (instancetype)init;
